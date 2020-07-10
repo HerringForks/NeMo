@@ -101,10 +101,11 @@ import nemo.core as nemo_core
 from nemo import logging
 from nemo.collections.nlp.data.datasets.lm_bert_dataset import BERTPretrainingDataDesc
 from nemo.utils.lr_policies import get_lr_policy
+import herring.torch as herring
 
 parser = argparse.ArgumentParser(description='BERT pretraining')
 parser.add_argument(
-    "--local_rank", default=None, type=int, help="Automatically set when using Multi-GPU with torch.distributed."
+    "--local_rank", default=herring.get_local_rank(), type=int, help="Automatically set when using Multi-GPU with torch.distributed."
 )
 parser.add_argument("--num_gpus", default=1, type=int, help="Number of GPUs to use.")
 parser.add_argument("--train_data", required=True, type=str, help="path to training dataset.")
@@ -278,7 +279,17 @@ if 'data_text' in sys.argv:
     args.vocab_size = tokenizer.vocab_size
 
 
-bert_model = nemo_nlp.nm.trainables.huggingface.BERT(
+# bert_model = nemo_nlp.nm.trainables.huggingface.BERT(
+#     vocab_size=args.vocab_size,
+#     num_hidden_layers=args.num_hidden_layers,
+#     hidden_size=args.hidden_size,
+#     num_attention_heads=args.num_attention_heads,
+#     intermediate_size=args.intermediate_size,
+#     max_position_embeddings=args.max_seq_length,
+#     hidden_act=args.hidden_act,
+# )
+
+bert_model = nemo_nlp.nm.trainables.huggingface.BertPretrain(
     vocab_size=args.vocab_size,
     num_hidden_layers=args.num_hidden_layers,
     hidden_size=args.hidden_size,
@@ -295,29 +306,31 @@ if args.bert_checkpoint is not None:
 data layers, BERT encoder, and MLM and NSP loss functions
 """
 
-mlm_classifier = nemo_nlp.nm.trainables.BertTokenClassifier(
-    args.hidden_size, num_classes=args.vocab_size, activation=args.hidden_act, log_softmax=True
-)
+# mlm_classifier = nemo_nlp.nm.trainables.BertTokenClassifier(
+#     args.hidden_size, num_classes=args.vocab_size, activation=args.hidden_act, log_softmax=True
+# )
 mlm_loss_fn = nemo_nlp.nm.losses.SmoothedCrossEntropyLoss()
-if not args.only_mlm_loss:
-    nsp_classifier = nemo_nlp.nm.trainables.SequenceClassifier(
-        args.hidden_size, num_classes=2, num_layers=2, activation='tanh', log_softmax=False
-    )
-    nsp_loss_fn = nemo_common.CrossEntropyLossNM()
+#mlm_loss_fn = nemo_common.CrossEntropyLossNM()
+# if not args.only_mlm_loss:
+#     nsp_classifier = nemo_nlp.nm.trainables.SequenceClassifier(
+#         args.hidden_size, num_classes=2, num_layers=2, activation='tanh', log_softmax=False
+#     )
 
-    bert_loss = nemo.backends.pytorch.common.losses.LossAggregatorNM(num_inputs=2)
+nsp_loss_fn = nemo_common.CrossEntropyLossNM()
+
+bert_loss = nemo.backends.pytorch.common.losses.LossAggregatorNM(num_inputs=2)
 
 # tie weights of MLM softmax layer and embedding layer of the encoder
-if mlm_classifier.mlp.last_linear_layer.weight.shape != bert_model.bert.embeddings.word_embeddings.weight.shape:
-    raise ValueError("Final classification layer does not match embedding layer.")
-# mlm_classifier.mlp.last_linear_layer.weight = bert_model.bert.embeddings.word_embeddings.weight
-mlm_classifier.tie_weights_with(
-    bert_model,
-    weight_names=["mlp.last_linear_layer.weight"],
-    name2name_and_transform={
-        "mlp.last_linear_layer.weight": ("bert.embeddings.word_embeddings.weight", nemo_core.WeightShareTransform.SAME)
-    },
-)
+# if mlm_classifier.mlp.last_linear_layer.weight.shape != bert_model.bert.embeddings.word_embeddings.weight.shape:
+#     raise ValueError("Final classification layer does not match embedding layer.")
+# # mlm_classifier.mlp.last_linear_layer.weight = bert_model.bert.embeddings.word_embeddings.weight
+# mlm_classifier.tie_weights_with(
+#     bert_model,
+#     weight_names=["mlp.last_linear_layer.weight"],
+#     name2name_and_transform={
+#         "mlp.last_linear_layer.weight": ("bert.embeddings.word_embeddings.weight", nemo_core.WeightShareTransform.SAME)
+#     },
+# )
 
 
 def create_pipeline(data_file, batch_size, preprocessed_data=False, batches_per_step=1, **kwargs):
@@ -345,13 +358,17 @@ def create_pipeline(data_file, batch_size, preprocessed_data=False, batches_per_
     steps_per_epoch = math.ceil(len(data_layer) / (batch_size * args.num_gpus * batches_per_step))
 
     input_data = data_layer()
-    hidden_states = bert_model(
+    output = bert_model(
         input_ids=input_data.input_ids, token_type_ids=input_data.input_type_ids, attention_mask=input_data.input_mask
     )
-    mlm_logits = mlm_classifier(hidden_states=hidden_states)
+    print(output)
+    mlm_logits = output[0]
+    nsp_logits = output[1]
+    print(mlm_logits, nsp_logits)
+    #mlm_logits = mlm_classifier(hidden_states=hidden_states)
     mlm_loss = mlm_loss_fn(logits=mlm_logits, labels=input_data.output_ids, output_mask=input_data.output_mask)
     if not args.only_mlm_loss:
-        nsp_logits = nsp_classifier(hidden_states=hidden_states)
+        #nsp_logits = nsp_classifier(hidden_states=hidden_states)
         nsp_loss = nsp_loss_fn(logits=nsp_logits, labels=input_data.labels)
         loss = bert_loss(loss_1=mlm_loss, loss_2=nsp_loss)
     else:
@@ -391,6 +408,7 @@ else:
         batch_size=args.batch_size,
         batches_per_step=args.batches_per_step,
     )
+    print("train loss: ", train_loss, mlm_loss, nsp_loss)
     eval_loss, eval_mlm_loss, eval_nsp_loss, eval_steps_per_epoch = create_pipeline(
         data_file=args.eval_data,
         preprocessed_data=True,
@@ -400,7 +418,7 @@ else:
         batches_per_step=args.batches_per_step,
     )
 
-logging.info("steps per epoch", steps_per_epoch)
+logging.info("steps per epoch :%s", steps_per_epoch)
 # callback which prints training loss and perplexity once in a while
 if not args.only_mlm_loss:
     log_tensors = [train_loss, mlm_loss, nsp_loss]
@@ -414,6 +432,7 @@ train_callback = nemo_core.SimpleLossLoggerCallback(
     print_func=lambda x: logging.info(print_msg.format(*[y.item() for y in x])),
     get_tb_values=lambda x: [["loss", x[0]]],
     tb_writer=nf.tb_writer,
+    #global_rank=herring.get_world_size()
 )
 
 ckpt_callback = nemo_core.CheckpointCallback(
@@ -428,6 +447,7 @@ eval_callback = nemo.core.EvaluatorCallback(
     user_iter_callback=nemo_nlp.callbacks.lm_bert_callback.eval_iter_callback,
     user_epochs_done_callback=nemo_nlp.callbacks.lm_bert_callback.eval_epochs_done_callback,
     eval_step=args.eval_step_freq,
+    global_rank=herring.get_world_size()
 )
 
 # define learning rate decay policy

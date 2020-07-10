@@ -133,12 +133,15 @@ class BertPretrainingPreprocessedDataLayer(DataLayerNM):
         self.max_pred_length = max_pred_length
         self.mode = mode
         total_length = 0
+        '''
         for f in self.files:
+            print(f)
             fp = h5py.File(f, 'r')
             total_length += len(fp['input_ids'])
             fp.close()
         self.total_length = total_length
-
+        '''
+        self.total_length = 0
     def _collate_fn(self, x):
         num_components = len(x[0])
         components = [[] for _ in range(num_components)]

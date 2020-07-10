@@ -111,7 +111,7 @@ class ModuleSaverCallback(ActionCallback):
 
     @deprecated(version="0.12", explanation="The callback section of NeMo has been updated.")
     def __init__(
-        self, save_modules_list, step_freq=1000, folder=None, checkpoints_to_keep=4,
+        self, save_modules_list, step_freq=1000, folder=None, checkpoints_to_keep=4, global_rank=None,
     ):
         super().__init__()
         self._save_modules_list = save_modules_list
@@ -119,6 +119,7 @@ class ModuleSaverCallback(ActionCallback):
         self._step_freq = step_freq
         self._ckpt2keep = checkpoints_to_keep
         self._saved_ckpts = []
+        self.global_rank = global_rank
 
     def on_iteration_end(self):
         step = self.step
@@ -170,7 +171,7 @@ class SimpleLossLoggerCallback(ActionCallback):
 
     @deprecated(version="0.12", explanation="The callback section of NeMo has been updated.")
     def __init__(
-        self, tensors, print_func=None, get_tb_values=None, log_to_tb_func=None, step_freq=25, tb_writer=None,
+        self, tensors, print_func=None, get_tb_values=None, log_to_tb_func=None, step_freq=25, tb_writer=None,global_rank=None,
     ):
 
         super().__init__()
@@ -185,6 +186,7 @@ class SimpleLossLoggerCallback(ActionCallback):
         self._start_time = None
         self._last_epoch_start = None
         self._last_iter_start = None
+        self._global_rank = global_rank
 
     @property
     def tensors(self):
@@ -208,6 +210,7 @@ class SimpleLossLoggerCallback(ActionCallback):
             self._last_epoch_start = time.time()
 
     def on_epoch_end(self):
+        logging.info("global_rank: %s", self._global_rank)
         if self.global_rank is None or self.global_rank == 0:
             step = self.step
 
@@ -270,6 +273,7 @@ class EvaluatorCallback(ActionCallback):
         wandb_name=None,
         wandb_project=None,
         eval_at_start=True,
+        global_rank=None,
     ):
         # TODO: Eval_epoch currently does nothing
         if eval_step is None and eval_epoch is None:
@@ -293,6 +297,8 @@ class EvaluatorCallback(ActionCallback):
         self._wandb_project = wandb_project
         self._wandb_name = wandb_name
 
+        self._global_rank = global_rank
+
     @property
     def eval_tensors(self):
         return self._eval_tensors
@@ -312,16 +318,16 @@ class EvaluatorCallback(ActionCallback):
         if self.step == 0 and not self._eval_at_start:
             return
         if self.step % self._eval_frequency == 0:
-            if self.global_rank == 0 or self.global_rank is None:
+            if self._global_rank == 0 or self._global_rank is None:
                 logging.info('Doing Evaluation ' + '.' * 30)
             start_time = time.time()
             self.action._eval(self._eval_tensors, self, self.step)
             elapsed_time = time.time() - start_time
-            if self.global_rank == 0 or self.global_rank is None:
+            if self._global_rank == 0 or self._global_rank is None:
                 logging.info(f'Evaluation time: {elapsed_time} seconds')
 
     def on_action_start(self):
-        if self.global_rank is None or self.global_rank == 0:
+        if self._global_rank is None or self._global_rank == 0:
             if self._wandb_name is not None or self._wandb_project is not None:
                 if _WANDB_AVAILABLE and wandb.run is None:
                     wandb.init(name=self._wandb_name, project=self._wandb_project)
@@ -335,12 +341,12 @@ class EvaluatorCallback(ActionCallback):
 
     def on_action_end(self):
         step = self.step
-        if self.global_rank == 0 or self.global_rank is None:
+        if self._global_rank == 0 or self._global_rank is None:
             logging.info('Final Evaluation ' + '.' * 30)
         start_time = time.time()
         self.action._eval(self._eval_tensors, self, step)
         elapsed_time = time.time() - start_time
-        if self.global_rank == 0 or self.global_rank is None:
+        if self._global_rank == 0 or self._global_rank is None:
             logging.info(f'Evaluation time: {elapsed_time} seconds')
 
     def clear_global_var_dict(self):

@@ -33,6 +33,9 @@ import nemo
 from nemo.core.callbacks import ActionCallback, EvaluatorCallback, NeMoCallback
 from nemo.core.neural_types import NmTensor
 from nemo.utils import ExpManager, logging
+import herring.torch as herring
+
+
 
 
 class DeploymentFormat(Enum):
@@ -144,6 +147,9 @@ class NeuralModuleFactory(object):
         if True:  # backend == Backend.PyTorch:
             # TODO: Move all framework specific code from this file
             import torch
+            torch.distributed.get_world_size = herring.get_world_size
+            torch.distributed.get_rank = herring.get_rank
+            torch.distributed.broadcast = herring.broadcast
 
             if self._placement != DeviceType.CPU:
                 if not torch.cuda.is_available():
@@ -173,7 +179,8 @@ class NeuralModuleFactory(object):
             # logging.info("random: %d", )
 
             if self._local_rank is not None:
-                torch.distributed.init_process_group(backend="nccl", init_method="env://")
+                logging.info("local_rank: %s", self._local_rank)
+                #torch.distributed.init_process_group(backend="nccl", init_method="env://")
 
                 cuda_set = True
                 # Try to set cuda device. This should fail if self._local_rank
@@ -190,8 +197,10 @@ class NeuralModuleFactory(object):
                 # Do an all_reduce to ensure all workers obtained a GPU
                 # For the strangest reason, BAND doesn't work so I am resorting
                 # to MIN.
-                torch.distributed.all_reduce(cuda_set_t, op=torch.distributed.ReduceOp.MIN)
-                if cuda_set_t.item() == 0:
+                #torch.distributed.all_reduce(cuda_set_t, op=torch.distributed.ReduceOp.MIN)
+                herring.all_reduce(cuda_set_t)
+                if cuda_set_t.item() != herring.get_world_size():
+                    logging.info("cuda_set_t: %s", cuda_set_t.item())
                     raise RuntimeError(
                         "There was an error initializing distributed training."
                         " Perhaps you specified more gpus than you have "
